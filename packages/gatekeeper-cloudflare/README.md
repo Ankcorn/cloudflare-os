@@ -217,22 +217,25 @@ const health = await env.CLOUDFLARE_NOTIFICATIONS.getStatus();
 ```
 
 `subscribe(callback)` receives all types sent to this destination. Optional `alertTypes` and
-`policyIds` filters combine with AND; an empty list matches nothing. The callback receives normalized
-account/type/time, optional policy/name/text/correlation/event-state metadata, and the original
-product-specific `data`. Treat all evidence and notification text as untrusted input, never as agent
-instructions or authorization.
+`policyIds` filters combine with AND; an empty list matches nothing. The callback receives the bound
+account and notification time, optional alert type, policy/name/text/correlation/event-state metadata,
+and the original product-specific `data`. Cloudflare's documented payload may omit `account_id`,
+`policy_id`, or `alert_type`; when `account_id` is present, it must match the bound account.
 
 ### Delivery and lifecycle
 
-The receiver verifies `cf-webhook-auth`, accepts Cloudflare's documented `{"text":"…"}` test message,
-and checks the account in every event. Request bodies are capped at 512 KiB while streaming, not after
-an unbounded allocation. API keys are random 256-bit values; only their SHA-256 verifier is retained
-locally. Provider requests are fixed-origin, bounded, time-limited, and do not follow redirects.
+The router verifies `cf-webhook-auth` in one of 256 credential shards before reading the body or
+contacting the account receiver. The receiver verifies it again, accepts Cloudflare's documented
+`{"text":"…"}` test message, and checks any reported account ID. Request bodies are capped at
+512 KiB while streaming, not after an unbounded allocation. API keys are random 256-bit values;
+only their SHA-256 verifier is retained locally. Provider requests are fixed-origin, bounded,
+time-limited, and do not follow redirects.
 
 A successful event returns **204 after all matching subscribers accept it**. Callback or authorization
 failure returns **500**, allowing ANS to retry. There is no local delivery queue, retry loop, or alarm.
-Callbacks must accept events promptly (within ten seconds), for example by creating an agent task;
-long-running work and errors after that handoff belong to the consumer.
+Callbacks should accept events promptly, for example by creating an agent task; long-running work and
+errors after that handoff belong to the consumer. The gatekeeper waits for the real callback result
+instead of racing it against a timer that could allow overlapping retries.
 
 Successful handoffs are remembered per subscriber, so an ANS retry skips subscribers that already
 accepted the event. A SHA-256 of the JSON envelope identifies duplicates while keeping different
@@ -241,7 +244,8 @@ bounded to the newest 10,000 receipts per connection/account. Concurrent duplica
 A crash or timeout after a callback commits can still cause redelivery: use `notification.id` to make
 side effects idempotent. Delivery order is not guaranteed, and delivery stops if ANS exhausts its retries.
 
-A connection supports 100 hooks. Each callback is preceded by Workshop observation authorization.
+A connection supports 100 hooks. Each callback is preceded by a Cloudflare-specific Workshop
+observation describing the bound account, reported alert type, policy ID, and event state.
 Notification status and delivered alerts are marked as restricted data, so observing either latches
 the workspace against sharing. Notifications bindings are private to their owner. Disabling a hook stops future handoffs but preserves
 the webhook so existing notification policies retain their destination. Disconnecting Cloudflare stops ingress and delivery,
@@ -251,6 +255,11 @@ expired ones; use the connection's reconnect flow to refresh those credentials i
 setup is reconciled by the exact webhook URL, allowing recovery from interrupted creation without taking
 over similarly named destinations owned by other connections. No existing notification policies are
 rewritten by setup.
+
+This binding exposes no gadget-initiated writes. Destination creation happens only after the user
+approves and enables the hook in Connections; notification policies are managed in Cloudflare.
+Consequently it submits observations for status reads and deliveries, but has no action to submit
+through `ActionDescription`.
 
 ### Local development
 
@@ -275,7 +284,11 @@ CLOUDFLARE_OAUTH_CLIENT_SECRET=<client secret>
 
 Use a deployed test instance with a public HTTPS address for real ANS delivery. Configure the test
 OAuth client with the deployed callback URL (`https://<test-host>/gatekeeper/cloudflare/oauth`)
-and store its credentials using the deployment's normal secret configuration.
+and store its credentials using the deployment's normal secret configuration. `BASE_URL` must
+resolve to this Worker's public HTTPS address. If notification ingress uses a different public
+hostname or path, set `NOTIFICATIONS_WEBHOOK_BASE_URL` to that base address and route it to the same
+Worker. The notification address must use HTTPS on port 443, without URL credentials, query, or
+fragment; Cloudflare only dispatches generic webhooks to public ports 80 or 443.
 
 Connect the test Cloudflare account, enable a notification subscription, and use **Save and Test** on
 its webhook destination in Cloudflare. Confirm that the test timestamp appears in the connection's

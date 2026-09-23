@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   isWebhookTest,
+  notificationWebhookBaseUrl,
   parseNotificationWebhook,
   parseNotificationWebhookPath,
 } from "../src/notifications-webhook.js";
@@ -68,6 +69,17 @@ describe("Cloudflare's documented webhook envelope", () => {
     ).not.toBe(first.id);
   });
 
+  it("uses the authenticated endpoint account when optional account and alert type are absent", async () => {
+    const result = await parseNotificationWebhook(JSON.stringify({
+      ts: 1136214245,
+      data: { incident: "reported by Cloudflare" },
+      text: "An alert without the optional identifiers",
+    }), accountId);
+    expect(result).toMatchObject({ accountId, data: { incident: "reported by Cloudflare" } });
+    expect(result.alertType).toBeUndefined();
+    expect(result.policyId).toBeUndefined();
+  });
+
   it.each([
     null,
     [],
@@ -82,7 +94,8 @@ describe("Cloudflare's documented webhook envelope", () => {
   });
 
   it("recognizes tests without mistaking a full notification for a test", () => {
-    expect(isWebhookTest({ text: "Hello World!" })).toBe(true);
+    expect(isWebhookTest({ text: "Hello World! This is a test message sent from https://cloudflare.com. If you can see this, your webhook is configured properly." })).toBe(true);
+    expect(isWebhookTest({ text: "A real text-only message" })).toBe(false);
     expect(isWebhookTest({ test: "unrecognized shape" })).toBe(false);
     expect(isWebhookTest(payload)).toBe(false);
     expect(isWebhookTest({ text: "test", account_id: accountId })).toBe(false);
@@ -101,5 +114,17 @@ describe("Cloudflare's documented webhook envelope", () => {
         "/gatekeeper/cloudflare",
       ),
     ).toBeNull();
+  });
+
+  it("requires a public HTTPS notification address with a routable path", () => {
+    expect(notificationWebhookBaseUrl("https://hooks.example/notifications/"))
+      .toBe("https://hooks.example/notifications");
+    for (const value of [
+      "http://hooks.example/notifications",
+      "https://hooks.example:8443/notifications",
+      "https://localhost/notifications",
+      "https://user:secret@hooks.example/notifications",
+      "https://hooks.example/notifications?token=secret",
+    ]) expect(() => notificationWebhookBaseUrl(value)).toThrow();
   });
 });

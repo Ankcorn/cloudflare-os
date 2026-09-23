@@ -9,10 +9,11 @@ import type {
   HookController,
   HookInitiator,
   HookTargetMetadata,
+  ObservationDescription,
   ResourceDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
-import { stripTrailingSlashes } from "@gadgets/workshop-shared/gatekeeper";
 import { privateObservers } from "@gadgets/gatekeeper-kit/observers";
+import { SerialTaskQueue } from "@gadgets/gatekeeper-kit/serial-queue";
 import { obsContext } from "./observability.js";
 import {
   provisionNotificationInstallation,
@@ -25,6 +26,7 @@ import {
   matchesWebhookApiKey,
   MAX_NOTIFICATION_BODY_BYTES,
   notificationReceiverName,
+  notificationWebhookBaseUrl,
   parseNotificationWebhook,
   isWebhookTest,
 } from "./notifications-webhook.js";
@@ -60,10 +62,51 @@ type HookProps = NotificationsProps & { hookId: string; filter: CloudflareNotifi
 type StoredHook = { props: HookProps; initiator: Fetcher<HookInitiator<HookTarget>> };
 type Installation = NotificationInstallation & NotificationsProps & { authHash: string };
 
+function disposeHook(hook: StoredHook | undefined): void {
+  (hook?.initiator as (Fetcher<HookInitiator<HookTarget>> & Partial<Disposable>) | undefined)
+    ?.[Symbol.dispose]?.();
+}
+
+/** A fixed set of credential shards keeps unknown URLs from creating receiver objects. */
+export class CloudflareNotificationRegistry extends DurableObject<NotificationEnv> {
+  async authorize(name: string, apiKey: string): Promise<boolean> {
+    const hash = this.ctx.storage.kv.get<string>(name);
+    return hash !== undefined && matchesWebhookApiKey(apiKey, hash);
+  }
+  register(name: string, hash: string): void {
+    this.ctx.storage.kv.put(name, hash);
+  }
+  remove(name: string): void {
+    this.ctx.storage.kv.delete(name);
+  }
+}
+
+function registry(env: NotificationEnv, props: NotificationsProps) {
+  const name = notificationReceiverName(props.userObjectId, props.accountId);
+  return env.NOTIFICATION_REGISTRY.getByName(name.slice(0, 2));
+}
+
 function receiver(ctx: DurableObjectState<NotificationsProps>, props: NotificationsProps) {
   return ctx.exports.CloudflareNotificationReceiver.getByName(
     notificationReceiverName(props.userObjectId, props.accountId),
   );
+}
+
+function auditIdentifier(value: string | undefined): string {
+  if (value === undefined) return "not provided";
+  return /^[A-Za-z0-9_./:-]{1,120}$/.test(value) ? value : "value omitted";
+}
+
+function notificationObservation(notification: CloudflareNotification): ObservationDescription {
+  const alertType = auditIdentifier(notification.alertType);
+  return {
+    title: `Cloudflare notification: ${alertType}`,
+    description: `Receive an authenticated Cloudflare notification for account ${notification.accountId}. ` +
+      `Alert type: ${alertType}; policy ID: ${auditIdentifier(notification.policyId)}; ` +
+      `event state: ${auditIdentifier(notification.event)}. The body includes free-form text and ` +
+      "product-specific evidence.",
+    containsRestrictedData: true,
+  };
 }
 
 @validateRpc()
@@ -95,25 +138,20 @@ class CloudflareNotificationsSessionImpl
     }
     const props: HookProps = { ...this.#ctx.props, hookId: crypto.randomUUID(), filter };
     const controller = this.#ctx.exports.CloudflareNotificationHookController({ props });
-    // @ts-expect-error Cap'n Web loses the callback intersection while mapping generic bindHook.
     await this.#queue.bindHook(controller, callback, {
-      title: "Subscribe to Cloudflare notifications",
-      description:
-        "Receive notifications from the selected account" +
-        (filter.alertTypes
-          ? ` for ${filter.alertTypes.length} selected alert types`
-          : " for all alert types") +
-        ".",
+      title: `Cloudflare notifications for ${props.accountId}`,
+      description: `Receive notifications from Cloudflare account ${props.accountId}. ` +
+        (filter.alertTypes ? `Alert types: ${filter.alertTypes.length} selected. ` : "All alert types. ") +
+        (filter.policyIds ? `Policies: ${filter.policyIds.length} selected.` : "All policies."),
     });
   }
   async getStatus(): Promise<CloudflareNotificationStatus> {
-    const status = await receiver(this.#ctx, this.#ctx.props).getStatus();
     await this.#queue.authorizeObservation({
-      title: "Cloudflare notification delivery status",
-      description: "Read setup and delivery health for the bound account.",
+      title: `Cloudflare notification status for ${this.#ctx.props.accountId}`,
+      description: `Read destination ID, subscriber count, and recent delivery times for Cloudflare account ${this.#ctx.props.accountId}.`,
       containsRestrictedData: true,
     });
-    return status;
+    return receiver(this.#ctx, this.#ctx.props).getStatus();
   }
 }
 
@@ -181,6 +219,7 @@ export class CloudflareNotificationHookController
 
 /** Webhook handoff per connection/account. ANS owns retries; only successful receipts are stored. */
 export class CloudflareNotificationReceiver extends DurableObject<NotificationEnv> {
+  #mutations = new SerialTaskQueue();
   #provisioning?: Promise<void>;
   #inFlight = new Map<string, Promise<boolean>>();
   constructor(ctx: DurableObjectState, env: NotificationEnv) {
@@ -206,6 +245,11 @@ export class CloudflareNotificationReceiver extends DurableObject<NotificationEn
   #hooks() {
     return [...this.ctx.storage.kv.list<StoredHook>({ prefix: "hook:" })].map(([, hook]) => hook);
   }
+  #hookCount(): number {
+    const hooks = this.#hooks();
+    for (const hook of hooks) disposeHook(hook);
+    return hooks.length;
+  }
 
   async #provision(props: NotificationsProps): Promise<void> {
     const account = this.#account(props.userObjectId);
@@ -214,25 +258,22 @@ export class CloudflareNotificationReceiver extends DurableObject<NotificationEn
     }
     const token = await account.getAccessToken();
     if (!token) throw new Error("Reconnect Cloudflare before enabling notifications.");
-    // Record ownership before external side effects, so disconnect can stop even incomplete setup.
-    await account.registerNotificationAccount(props.accountId);
-    const base = stripTrailingSlashes(
+    const base = notificationWebhookBaseUrl(
       this.env.NOTIFICATIONS_WEBHOOK_BASE_URL ??
         this.env.BASE_URL ??
         "http://localhost:8787/gatekeeper/cloudflare",
     );
-    if (new URL(base).protocol !== "https:") {
-      throw new Error(
-        "Cloudflare needs a public HTTPS webhook URL. Use a deployed test instance with a public HTTPS webhook address, then enable the connection again.",
-      );
-    }
+    // Record ownership before external side effects, so disconnect can stop incomplete setup.
+    await account.registerNotificationAccount(props.accountId);
     const webhookUrl = `${base}/webhooks/${props.userObjectId}/${props.accountId}`;
     this.ctx.storage.kv.put("webhookUrl", webhookUrl);
     const apiKey = generateWebhookApiKey();
     const authHash = await hashWebhookApiKey(apiKey);
     this.ctx.storage.kv.put("pendingAuthHash", authHash);
     this.ctx.storage.kv.put("owner", props);
+    const credentialRegistry = registry(this.env, props);
     try {
+      await credentialRegistry.register(notificationReceiverName(props.userObjectId, props.accountId), authHash);
       const installation = await provisionNotificationInstallation(
         token,
         props.accountId,
@@ -245,40 +286,53 @@ export class CloudflareNotificationReceiver extends DurableObject<NotificationEn
         authHash,
       });
       this.ctx.storage.kv.put("setupComplete", true);
+    } catch (error) {
+      await credentialRegistry.remove(notificationReceiverName(props.userObjectId, props.accountId));
+      throw error;
     } finally {
       this.ctx.storage.kv.delete("pendingAuthHash");
     }
   }
 
   async enable(props: HookProps, initiator: Fetcher<HookInitiator<HookTarget>>): Promise<void> {
-    const owner = this.ctx.storage.kv.get<NotificationsProps>("owner");
-    if (
-      owner &&
-      (owner.accountId !== props.accountId || owner.userObjectId !== props.userObjectId)
-    ) {
-      throw new Error("Notification receiver belongs to another account.");
-    }
-    if (this.ctx.storage.kv.get("suspended"))
-      throw new Error("This notification connection has been disconnected.");
-    if (!this.ctx.storage.kv.get(`hook:${props.hookId}`) && this.#hooks().length >= MAX_HOOKS) {
-      throw new Error("This notification connection has reached its subscriber limit.");
-    }
-    if (!this.ctx.storage.kv.get("setupComplete")) {
-      this.#provisioning ??= this.#provision(props).finally(() => {
-        this.#provisioning = undefined;
-      });
-      await this.#provisioning;
-    }
-    if (this.ctx.storage.kv.get("suspended"))
-      throw new Error("This notification connection has been disconnected.");
-    if (!this.ctx.storage.kv.get(`hook:${props.hookId}`) && this.#hooks().length >= MAX_HOOKS) {
-      throw new Error("This notification connection has reached its subscriber limit.");
-    }
-    this.ctx.storage.kv.put<StoredHook>(`hook:${props.hookId}`, { props, initiator });
+    await this.#mutations.run(async () => {
+      const owner = this.ctx.storage.kv.get<NotificationsProps>("owner");
+      if (owner && (owner.accountId !== props.accountId || owner.userObjectId !== props.userObjectId))
+        throw new Error("Notification receiver belongs to another account.");
+      if (this.ctx.storage.kv.get("suspended"))
+        throw new Error("This notification connection has been disconnected.");
+      const key = `hook:${props.hookId}`;
+      const existing = this.ctx.storage.kv.get<StoredHook>(key);
+      const alreadyEnabled = existing !== undefined;
+      disposeHook(existing);
+      if (!alreadyEnabled && this.#hookCount() >= MAX_HOOKS)
+        throw new Error("This notification connection has reached its subscriber limit.");
+      if (!this.ctx.storage.kv.get("setupComplete")) {
+        this.#provisioning = this.#provision(props).finally(() => {
+          this.#provisioning = undefined;
+        });
+        await this.#provisioning;
+      }
+      if (this.ctx.storage.kv.get("suspended"))
+        throw new Error("This notification connection has been disconnected.");
+      const replaced = this.ctx.storage.kv.get<StoredHook>(key);
+      try {
+        this.ctx.storage.kv.put<StoredHook>(key, { props, initiator });
+      } finally {
+        disposeHook(replaced);
+      }
+    });
   }
 
   async disable(hookId: string): Promise<void> {
-    this.ctx.storage.kv.delete(`hook:${hookId}`);
+    await this.#mutations.run(() => {
+      const key = `hook:${hookId}`;
+      const existing = this.ctx.storage.kv.get<StoredHook>(key);
+      this.ctx.storage.kv.delete(key);
+      disposeHook(existing);
+    });
+    await Promise.allSettled([...this.#inFlight]
+      .filter(([key]) => key.endsWith(`:${hookId}`)).map(([, delivery]) => delivery));
     this.ctx.storage.sql.exec("DELETE FROM notification_receipts WHERE hook_id = ?", hookId);
   }
   async suspend(): Promise<void> {
@@ -294,9 +348,12 @@ export class CloudflareNotificationReceiver extends DurableObject<NotificationEn
     const webhookUrl = this.ctx.storage.kv.get<string>("webhookUrl");
     if (owner && webhookUrl)
       await removeNotificationConnection(token, owner.accountId, webhookUrl, installation);
+    if (owner) await registry(this.env, owner).remove(notificationReceiverName(owner.userObjectId, owner.accountId));
     // Keep a tombstone so outstanding controller capabilities cannot resurrect this receiver.
-    for (const [key] of this.ctx.storage.kv.list())
+    for (const [key, value] of this.ctx.storage.kv.list()) {
       if (key !== "suspended") this.ctx.storage.kv.delete(key);
+      if (key.startsWith("hook:")) disposeHook(value as StoredHook);
+    }
     this.ctx.storage.sql.exec("DELETE FROM notification_receipts");
   }
 
@@ -306,7 +363,7 @@ export class CloudflareNotificationReceiver extends DurableObject<NotificationEn
       installed: !!this.ctx.storage.kv.get("setupComplete"),
       suspended: !!this.ctx.storage.kv.get("suspended"),
       webhookId: installation?.webhookId,
-      subscribers: this.#hooks().length,
+      subscribers: this.#hookCount(),
       lastTestAt: this.ctx.storage.kv.get<string>("lastTestAt"),
       lastReceivedAt: this.ctx.storage.kv.get<string>("lastReceivedAt"),
     };
@@ -334,17 +391,20 @@ export class CloudflareNotificationReceiver extends DurableObject<NotificationEn
     if (!(await this.#hasCredentials(installation!))) return 500;
     // Recheck after hashing yielded: a concurrent disconnect must win over new delivery.
     if (this.ctx.storage.kv.get("suspended")) return 410;
-    const hooks = this.#hooks().filter(
-      ({ props: { filter } }) =>
-        (!filter.alertTypes || filter.alertTypes.includes(notification.alertType)) &&
-        (!filter.policyIds ||
-          (notification.policyId !== undefined &&
-            filter.policyIds.includes(notification.policyId))),
-    );
     this.ctx.storage.sql.exec(
       "DELETE FROM notification_receipts WHERE delivered_at < ?",
       Date.now() - RETENTION_MS,
     );
+    const available = this.#hooks();
+    const hooks = available.filter(
+      ({ props: { filter } }) =>
+        (!filter.alertTypes || (notification.alertType !== undefined &&
+          filter.alertTypes.includes(notification.alertType))) &&
+        (!filter.policyIds ||
+          (notification.policyId !== undefined &&
+            filter.policyIds.includes(notification.policyId))),
+    );
+    for (const hook of available) if (!hooks.includes(hook)) disposeHook(hook);
     const results = await Promise.all(hooks.map((hook) => this.#handoff(hook, notification)));
     if (results.some((delivered) => !delivered)) return 500;
     if (this.ctx.storage.kv.get("suspended")) return 410;
@@ -355,7 +415,10 @@ export class CloudflareNotificationReceiver extends DurableObject<NotificationEn
   #handoff(stored: StoredHook, notification: CloudflareNotification): Promise<boolean> {
     const key = `${notification.id}:${stored.props.hookId}`;
     const running = this.#inFlight.get(key);
-    if (running) return running;
+    if (running) {
+      disposeHook(stored);
+      return running;
+    }
     const delivery = this.#deliver(stored, notification).finally(() => this.#inFlight.delete(key));
     this.#inFlight.set(key, delivery);
     return delivery;
@@ -363,43 +426,17 @@ export class CloudflareNotificationReceiver extends DurableObject<NotificationEn
 
   async #deliver(stored: StoredHook, notification: CloudflareNotification): Promise<boolean> {
     const hookId = stored.props.hookId;
-    if (
-      this.ctx.storage.sql
-        .exec(
-          "SELECT 1 FROM notification_receipts WHERE notification_id = ? AND hook_id = ?",
-          notification.id,
-          hookId,
-        )
-        .toArray().length
-    )
-      return true;
-    let active = true;
-    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
+      if (this.ctx.storage.sql.exec(
+        "SELECT 1 FROM notification_receipts WHERE notification_id = ? AND hook_id = ?",
+        notification.id, hookId,
+      ).toArray().length) return true;
       // The persistent initiator checks current workspace authority on every handoff.
-      // @ts-expect-error Worker RPC maps the disposable hook result through an RpcPromise.
-      using hook = stored.initiator.startHook();
-      const delivered = await Promise.race([
-        (async () => {
-          await hook.approvalQueue.authorizeObservation({
-            title: "Cloudflare notification",
-            description: "Received an alert from the bound Cloudflare account.",
-            containsRestrictedData: true,
-          });
-          if (
-            !active ||
-            this.ctx.storage.kv.get("suspended") ||
-            !this.ctx.storage.kv.get(`hook:${hookId}`)
-          )
-            return false;
-          await hook.callback.onNotification(notification);
-          return true;
-        })(),
-        new Promise<never>((_resolve, reject) => {
-          timer = setTimeout(() => reject(new Error("Notification handoff timed out.")), 10_000);
-        }),
-      ]);
-      if (!delivered) return false;
+      using hook = await stored.initiator.startHook();
+      await hook.approvalQueue.authorizeObservation(notificationObservation(notification));
+      if (this.ctx.storage.kv.get("suspended") || !this.ctx.storage.kv.get(`hook:${hookId}`))
+        return false;
+      await hook.callback.onNotification(notification);
       this.ctx.storage.sql.exec(
         "INSERT OR IGNORE INTO notification_receipts VALUES (?, ?, ?)",
         notification.id,
@@ -421,8 +458,7 @@ export class CloudflareNotificationReceiver extends DurableObject<NotificationEn
       });
       return false;
     } finally {
-      active = false;
-      if (timer !== undefined) clearTimeout(timer);
+      disposeHook(stored);
     }
   }
 }
