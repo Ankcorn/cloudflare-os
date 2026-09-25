@@ -1,0 +1,37 @@
+packages/gatekeeper-cloudflare/__tests__/notifications-api.test.ts
+  s_4ac5bb9bfb65ad::t_195dc07656d5fa 3-4,197-220
+packages/gatekeeper-cloudflare/__tests__/workerd/notifications.test.ts
+  s_4ac5bb9bfb65ad::t_303cd54150f120 280-334
+packages/gatekeeper-cloudflare/src/notifications-api.ts
+  s_4ac5bb9bfb65ad::t_44e35a038db6a0 9-34,71,193-207
+packages/gatekeeper-cloudflare/src/notifications-webhook.ts
+  s_4ac5bb9bfb65ad::t_bbb8ed01f5170e 9-16
+packages/gatekeeper-cloudflare/src/notifications.ts
+  s_4ac5bb9bfb65ad::t_c4512c19a9137a 23,33,90-97,276-277,279,286,348-358,374,377-396,405-410,414-426,428,438-451
+packages/gatekeeper-cloudflare/src/types.d.ts
+  s_4ac5bb9bfb65ad::t_5eaa874f4756e0 546-547,568
+packages/gatekeeper-cloudflare/worker-configuration.d.ts
+  s_4ac5bb9bfb65ad::t_3c0113cd1b9ced 2
+packages/gatekeeper-cloudflare/wrangler.jsonc
+  s_4ac5bb9bfb65ad::t_1d4f39bd002dcb 24-28
+scripts/release/manifest-lib.ts
+  s_4ac5bb9bfb65ad::t_ae4657f79eef56 246
+scripts/release/testdata/golden-manifest.json
+  s_4ac5bb9bfb65ad::t_673f7be8a1696e 70,73
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "9f8fa9ec2132f271d6aa650efec5959e41985348",
+  "prompts": {},
+  "sessions": {
+    "s_4ac5bb9bfb65ad": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f27034448ffeb8BQvO6PCD8J42",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Thomas Ankcorn <tankcorn@cloudflare.com>"
+    }
+  }
+}
