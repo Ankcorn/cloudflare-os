@@ -1,0 +1,19 @@
+packages/gatekeeper-cloudflare/worker-configuration.d.ts
+  s_4ac5bb9bfb65ad::t_a9bfb9796a42b7 8
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "f9b918d5f3b13c9e8cc04216b89860c46d931abb",
+  "prompts": {},
+  "sessions": {
+    "s_4ac5bb9bfb65ad": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_f27034448ffeb8BQvO6PCD8J42",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Thomas Ankcorn <tankcorn@cloudflare.com>"
+    }
+  }
+}
